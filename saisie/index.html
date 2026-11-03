@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="fr">
 <head>
@@ -146,16 +145,18 @@ function charger() {
   /* lien « compléter ou corriger » : il porte la dernière saisie envoyée ; il l'emporte sur un brouillon plus ancien */
   if (D.p && (!brouillon || (brouillon.base || "") < D.ts)) {
     const connus = new Set([...D.a, ...D.i]);
-    ETAT = { km: {}, nouveaux: [], base: D.ts, recu: true };
+    ETAT = { km: {}, nouveaux: [], base: D.ts, recu: true, envoyes: Object.keys(D.p) };
     for (const [n, k] of Object.entries(D.p)) { if (connus.has(n)) ETAT.km[n] = String(k).replace(".", ","); else ETAT.nouveaux.push({ nom: n, km: String(k).replace(".", ",") }); }
     garder();
   } else if (brouillon) ETAT = brouillon;
-  ETAT.km = ETAT.km || {}; ETAT.nouveaux = ETAT.nouveaux || [];
+  ETAT.km = ETAT.km || {}; ETAT.nouveaux = ETAT.nouveaux || []; ETAT.envoyes = ETAT.envoyes || [];
 }
 function garder() { ecrire(cle(), JSON.stringify(ETAT)); }
 
 function ligne(nom, k) {
   const v = ETAT.km[nom] || "";
+  if (!val(v) && ETAT.envoyes.includes(nom)) return `<div class="ligne"><label for="k${k}">${esc(nom)} <span class="doux">sera retiré</span></label>
+    <input id="k${k}" class="km" data-nom="${esc(nom)}" inputmode="decimal" autocomplete="off" value="${esc(v)}" placeholder="km"></div>`;
   return `<div class="ligne ${val(v) ? "saisi" : ""}"><label for="k${k}">${esc(nom)}</label>
     <input id="k${k}" class="km" data-nom="${esc(nom)}" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(v)}" placeholder="km"></div>`;
 }
@@ -197,6 +198,8 @@ function participants() {
   ETAT.nouveaux.filter(x => val(x.km)).forEach(x => l.push([x.nom, val(x.km), true]));
   return l;
 }
+/* personnes déjà envoyées (dernier mail reçu ou envoyé) dont la case a été vidée : retrait demandé par « 0 » */
+function retraits() { const ici = new Set(participants().map(x => x[0])); return ETAT.envoyes.filter(n => !ici.has(n)); }
 function total() {
   const l = participants(), km = l.reduce((a, x) => a + x[1], 0);
   $("#total").innerHTML = `<b>${l.length}</b> participant${l.length > 1 ? "s" : ""} · <b>${nbFr(Math.round(km))}</b> km`;
@@ -208,6 +211,7 @@ function corps(lienSuite) {
   const lig = (x, n) => x ? `${n}  ${x[0]}${x[1] ? `  –  ${x[1]} km` : ""}` : null;
   return [`Participation ${dateFr(D.d)}`, lig(D.l1, "L1"), lig(D.l2, "L2"), "",
     ...l.map(([, k, nouv], j) => `${noms[j]} ${".".repeat(w - noms[j].length)} ${fk(k)}${nouv ? "   (nouvel invité)" : ""}`),
+    ...retraits().map(n => `${n} ${".".repeat(Math.max(3, w - n.length))} ${fk(0)}   (retiré)`),
     "-".repeat(w + 7),
     `${l.length} participant${l.length > 1 ? "s" : ""}`.padEnd(w + 1) + " " + String(Math.round(km)).padStart(5) + " km",
     "", ...(lienSuite ? ["Compléter ou corriger cette saisie (réservé aux saisisseurs) :", lienSuite] : [])].filter(x => x !== null).join("\n");
@@ -216,9 +220,11 @@ async function preparer() {
   const p = {}; participants().forEach(([n, k]) => p[n] = k);
   const ts = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 19);
   const suite = `${location.origin}${location.pathname}#${await chiffrer(CODE, { ...D, p, ts })}`;
-  ETAT.base = ts; garder();
+  ETAT.base = ts;
+  const texte = corps(suite);
+  ETAT.envoyes = participants().map(x => x[0]); garder();
   const l = participants(), km = Math.round(l.reduce((a, x) => a + x[1], 0));
-  return { objet: `Participation ${dateFr(D.d)} – ${l.length} participant${l.length > 1 ? "s" : ""}, ${nbFr(km)} km`, texte: corps(suite) };
+  return { objet: `Participation ${dateFr(D.d)} – ${l.length} participant${l.length > 1 ? "s" : ""}, ${nbFr(km)} km`, texte };
 }
 $("#b-envoyer").onclick = async () => {
   if (!participants().length) { alert("Aucun km saisi."); return; }
@@ -239,3 +245,4 @@ demarrer();
 </script>
 </body>
 </html>
+
