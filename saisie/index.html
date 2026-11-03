@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="fr">
 <head>
@@ -51,13 +52,15 @@
 <div class="barre" id="barre" hidden><div class="barre-in">
   <div class="total" id="total"></div>
   <button id="b-copier" class="petit" type="button">Copier</button>
-  <button id="b-envoyer" class="principal" type="button">Envoyer</button>
+  <button id="b-envoyer" class="principal" type="button">Envoyer par mail</button>
 </div></div>
 <script>
 "use strict";
-/* Page de saisie de la participation (Sorties Club). La sortie et les noms arrivent chiffrés dans le lien,
-   après « # » (cette partie ne quitte pas le téléphone). Déchiffrement avec le code du club :
-   PBKDF2-SHA256 150 000 tours -> clé de flot + clé d'authentification, flot HMAC-SHA256 en mode compteur. */
+/* Page de saisie de la participation (Sorties Club). La sortie, les noms et les adresses arrivent chiffrés dans le
+   lien, après « # » (cette partie ne quitte pas le téléphone). Chiffrement avec le code du club : PBKDF2-SHA256
+   150 000 tours -> clé de flot + clé d'authentification, flot HMAC-SHA256 en mode compteur.
+   La saisie part par mail (boîte du secrétariat, saisisseurs en copie) avec un lien « Compléter ou corriger »
+   qui contient la saisie, chiffrée de la même façon. */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const enc = new TextEncoder();
@@ -88,7 +91,25 @@ async function dechiffrer(code, jeton) {
   return JSON.parse(new TextDecoder().decode(clair));
 }
 
+function b64url(u) { let s = ""; for (let i = 0; i < u.length; i += 8192) s += String.fromCharCode(...u.subarray(i, i + 8192));
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+async function chiffrer(code, donnees) {
+  const clair = enc.encode(JSON.stringify(donnees)), sel = crypto.getRandomValues(new Uint8Array(16)), nonce = crypto.getRandomValues(new Uint8Array(12));
+  const base = await crypto.subtle.importKey("raw", enc.encode(code), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: sel, iterations: 150000, hash: "SHA-256" }, base, 512));
+  const imp = k => crypto.subtle.importKey("raw", k, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const kc = await imp(bits.slice(0, 32)), km = await imp(bits.slice(32));
+  const ch = new Uint8Array(clair.length);
+  for (let i = 0, bloc = 0; i < clair.length; bloc++) {
+    const f = await hmac(kc, new Uint8Array([...nonce, bloc >>> 24 & 255, bloc >>> 16 & 255, bloc >>> 8 & 255, bloc & 255]));
+    for (let j = 0; j < 32 && i < clair.length; j++, i++) ch[i] = clair[i] ^ f[j];
+  }
+  const tag = (await hmac(km, new Uint8Array([...sel, ...nonce, ...ch]))).slice(0, 16);
+  return "v1." + b64url(new Uint8Array([...sel, ...nonce, ...tag, ...ch]));
+}
+
 const jeton = location.hash.slice(1);
+let CODE = null;
 const dateFr = d => d.split("-").reverse().join("/");
 const dateLongue = d => new Date(d + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const nbFr = v => Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 1 });
@@ -97,7 +118,7 @@ const val = s => { const v = parseFloat(String(s || "").replace(",", ".")); retu
 async function demarrer() {
   if (!jeton) { $("#app").innerHTML = '<h1>Participation</h1><p class="msg">Ouvrez cette page depuis le lien « Participation » de la page de la sortie.</p>'; return; }
   const code = lire("code-club");
-  if (code) { try { D = await dechiffrer(code, jeton); } catch (e) { if (e.message === "lien") return lienAbime(); } }
+  if (code) { try { D = await dechiffrer(code, jeton); CODE = code; } catch (e) { if (e.message === "lien") return lienAbime(); } }
   if (D) afficher(); else demanderCode();
 }
 function lienAbime() { $("#app").innerHTML = '<h1>Participation</h1><p class="msg erreur">Ce lien est incomplet. Rouvrez-le depuis la page de la sortie.</p>'; }
@@ -114,13 +135,23 @@ function demanderCode(erreur) {
     e.preventDefault();
     const c = $("#code").value.trim(); if (!c) return;
     e.submitter && (e.submitter.textContent = "Vérification…");
-    try { D = await dechiffrer(c, jeton); ecrire("code-club", c); afficher(); }
+    try { D = await dechiffrer(c, jeton); CODE = c; ecrire("code-club", c); afficher(); }
     catch (x) { demanderCode(x.message === "lien" ? "Ce lien est incomplet." : "Code incorrect."); }
   };
 }
 
 function cle() { return "saisie-" + D.d; }
-function charger() { try { ETAT = JSON.parse(lire(cle())) || ETAT; } catch (e) {} ETAT.km = ETAT.km || {}; ETAT.nouveaux = ETAT.nouveaux || []; }
+function charger() {
+  let brouillon = null; try { brouillon = JSON.parse(lire(cle())); } catch (e) {}
+  /* lien « compléter ou corriger » : il porte la dernière saisie envoyée ; il l'emporte sur un brouillon plus ancien */
+  if (D.p && (!brouillon || (brouillon.base || "") < D.ts)) {
+    const connus = new Set([...D.a, ...D.i]);
+    ETAT = { km: {}, nouveaux: [], base: D.ts, recu: true };
+    for (const [n, k] of Object.entries(D.p)) { if (connus.has(n)) ETAT.km[n] = String(k).replace(".", ","); else ETAT.nouveaux.push({ nom: n, km: String(k).replace(".", ",") }); }
+    garder();
+  } else if (brouillon) ETAT = brouillon;
+  ETAT.km = ETAT.km || {}; ETAT.nouveaux = ETAT.nouveaux || [];
+}
 function garder() { ecrire(cle(), JSON.stringify(ETAT)); }
 
 function ligne(nom, k) {
@@ -135,6 +166,7 @@ function afficher() {
   const lig = (x, n) => x ? `<div class="ligue"><b>${n}</b><span>${esc(x[0])}${x[1] ? ` · <b>${x[1]} km</b>` : ""}</span></div>` : "";
   let k = 0;
   $("#app").innerHTML = `<div class="doux">Participation</div><h1>${esc(dateLongue(D.d))}</h1>
+    ${ETAT.recu ? `<p class="msg">Saisie déjà envoyée${D.ts ? ` (${esc(D.ts.slice(8, 10) + "/" + D.ts.slice(5, 7) + " à " + D.ts.slice(11, 16))})` : ""} : complétez ou corrigez, puis renvoyez. Le nouvel envoi remplace le précédent.</p>` : ""}
     ${D.l1 || D.l2 ? `<div class="carte">${lig(D.l1, "L1")}${lig(D.l2, "L2")}<div class="doux" style="margin-top:4px">Saisissez les km réellement parcourus par chacun.</div></div>` : ""}
     <h2>Adhérents (${D.a.length})</h2>
     <div class="liste">${D.a.map(n => ligne(n, k++)).join("")}</div>
@@ -169,19 +201,38 @@ function total() {
   const l = participants(), km = l.reduce((a, x) => a + x[1], 0);
   $("#total").innerHTML = `<b>${l.length}</b> participant${l.length > 1 ? "s" : ""} · <b>${nbFr(Math.round(km))}</b> km`;
 }
-function message() {
+function corps(lienSuite) {
   const l = participants(), km = l.reduce((a, x) => a + x[1], 0);
-  return [`Participation ${dateFr(D.d)}`, `${l.length} participant${l.length > 1 ? "s" : ""} · ${nbFr(Math.round(km))} km`,
-          ...l.map(([n, k, nouv]) => `${nouv ? "+ " : ""}${n} : ${String(k).replace(".", ",")}`)].join("\n");
+  const noms = l.map(([n, , nouv]) => (nouv ? "+ " : "") + n), w = Math.max(18, ...noms.map(n => n.length)) + 3;
+  const fk = k => String(k).replace(".", ",").padStart(5);
+  const lig = (x, n) => x ? `${n}  ${x[0]}${x[1] ? `  –  ${x[1]} km` : ""}` : null;
+  return [`Participation ${dateFr(D.d)}`, lig(D.l1, "L1"), lig(D.l2, "L2"), "",
+    ...l.map(([, k, nouv], j) => `${noms[j]} ${".".repeat(w - noms[j].length)} ${fk(k)}${nouv ? "   (nouvel invité)" : ""}`),
+    "-".repeat(w + 7),
+    `${l.length} participant${l.length > 1 ? "s" : ""}`.padEnd(w + 1) + " " + String(Math.round(km)).padStart(5) + " km",
+    "", ...(lienSuite ? ["Compléter ou corriger cette saisie (réservé aux saisisseurs) :", lienSuite] : [])].filter(x => x !== null).join("\n");
 }
-$("#b-envoyer").onclick = () => {
+async function preparer() {
+  const p = {}; participants().forEach(([n, k]) => p[n] = k);
+  const ts = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+  const suite = `${location.origin}${location.pathname}#${await chiffrer(CODE, { ...D, p, ts })}`;
+  ETAT.base = ts; garder();
+  const l = participants(), km = Math.round(l.reduce((a, x) => a + x[1], 0));
+  return { objet: `Participation ${dateFr(D.d)} – ${l.length} participant${l.length > 1 ? "s" : ""}, ${nbFr(km)} km`, texte: corps(suite) };
+}
+$("#b-envoyer").onclick = async () => {
   if (!participants().length) { alert("Aucun km saisi."); return; }
-  location.href = `https://wa.me/${D.t}?text=${encodeURIComponent(message())}`;
+  $("#b-envoyer").textContent = "Préparation…";
+  const m = await preparer();
+  $("#b-envoyer").textContent = "Envoyer par mail";
+  const cc = (D.m.cc || []).join(",");
+  location.href = `mailto:${D.m.a}?${cc ? `cc=${encodeURIComponent(cc)}&` : ""}subject=${encodeURIComponent(m.objet)}&body=${encodeURIComponent(m.texte)}`;
+  $("#secours").innerHTML = `<p class="msg">Si votre messagerie ne s'est pas ouverte, utilisez « Copier » et envoyez le texte à ${esc(D.m.a)}${cc ? ` (copie : ${esc(cc)})` : ""}, avec pour objet « ${esc(m.objet)} ».</p>`;
 };
 $("#b-copier").onclick = async () => {
-  const m = message();
-  try { await navigator.clipboard.writeText(m); $("#secours").innerHTML = '<p class="msg">Message copié : collez-le dans WhatsApp.</p>'; }
-  catch (e) { $("#secours").innerHTML = `<p class="msg">Sélectionnez et copiez le message :</p><textarea readonly>${esc(m)}</textarea>`; }
+  const m = await preparer();
+  try { await navigator.clipboard.writeText(m.texte); $("#secours").innerHTML = `<p class="msg">Texte copié : collez-le dans un mail à ${esc(D.m.a)}, objet « ${esc(m.objet)} ».</p>`; }
+  catch (e) { $("#secours").innerHTML = `<p class="msg">Sélectionnez et copiez le texte, à envoyer à ${esc(D.m.a)} :</p><textarea readonly>${esc(m.texte)}</textarea>`; }
 };
 window.addEventListener("hashchange", () => location.reload());
 demarrer();
