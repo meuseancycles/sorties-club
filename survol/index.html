@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Survol 3D des parcours</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.css">
+<style>
+  :root { --texte: #1f2328; --doux: #5f6670; --trait: #dedbd2; --accent: #b5471b; --bleu: #2b5d9b; --fond: #f6f5f1; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font: 15px/1.4 "Segoe UI", system-ui, sans-serif; color: var(--texte); background: var(--fond); }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 14px; background: #26231f; color: #fff; }
+  header b { font-size: 16px; }
+  header .infos { color: #d9c9b8; font-size: 13px; }
+  header a { color: #f2c6ad; font-size: 13px; }
+  header select { margin-left: auto; font: inherit; padding: 3px 6px; border-radius: 5px; }
+  #carte { flex: 1; position: relative; min-height: 240px; }
+  #hud { position: absolute; top: 10px; left: 10px; z-index: 5; background: rgba(255,255,255,.93); border-radius: 6px; padding: 7px 11px; box-shadow: 0 1px 4px rgba(0,0,0,.25); font-size: 14px; max-width: calc(100% - 70px); }
+  .cote { color: var(--bleu); font-weight: 600; margin-top: 2px; }
+  .bas { display: grid; grid-template-columns: auto auto 1fr; gap: 6px 12px; align-items: center; padding: 8px 12px; background: #fff; border-top: 1px solid var(--trait); }
+  .bas button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  .bas select { font: inherit; padding: 4px; border-radius: 5px; }
+  .bas input[type=range] { width: 100%; }
+  #profil { grid-column: 1 / -1; width: 100%; display: block; cursor: pointer; }
+  .point { width: 14px; height: 14px; border-radius: 50%; background: #ffd34d; border: 3px solid #1f2328; }
+  .message { margin: 20px; padding: 10px 12px; background: #fff; border-radius: 6px; border: 1px solid var(--trait); }
+  .liste { padding: 14px; max-width: 760px; margin: 0 auto; width: 100%; overflow: auto; }
+  .liste input { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--trait); border-radius: 6px; margin-bottom: 10px; }
+  .liste a { display: flex; justify-content: space-between; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--trait); color: var(--texte); text-decoration: none; }
+  .liste a span { color: var(--doux); white-space: nowrap; }
+  @media (max-width: 600px) { .bas { grid-template-columns: auto 1fr; } .bas input[type=range] { grid-column: 1 / -1; } header .infos { width: 100%; } }
+</style>
+</head>
+<body>
+<header><b id="titre">Survol 3D des parcours</b><span class="infos" id="infos"></span></header>
+<main id="zone" style="flex:1;display:flex;flex-direction:column;min-height:0"></main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const nb = (v, d = 0) => v == null ? "" : Number(v).toLocaleString("fr-FR", { maximumFractionDigits: d });
+const num = new URLSearchParams(location.search).get("p");
+
+async function liste() {
+  const l = await (await fetch("donnees/index.json")).json();
+  $("#zone").innerHTML = `<div class="liste"><input id="q" type="search" placeholder="Rechercher un parcours…"><div id="l"></div></div>`;
+  const aff = () => {
+    const q = $("#q").value.trim().toLowerCase();
+    $("#l").innerHTML = l.filter(x => !q || x.nom.toLowerCase().includes(q) || String(x.p).includes(q))
+      .map(x => `<a href="?p=${x.p}">${esc(x.nom)}<span>${nb(x.km)} km · ${nb(x.dplus)} m</span></a>`).join("");
+  };
+  $("#q").oninput = aff; aff();
+}
+
+const FONDS = {
+  satellite: { tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"], attribution: "Imagerie © Esri", maxzoom: 18 },
+  plan: { tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png", "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap", maxzoom: 19 },
+};
+
+async function survol() {
+  let p;
+  try {
+    const idx = await (await fetch("donnees/index.json")).json();
+    const e = idx.find(x => String(x.p) === String(num));
+    p = (await (await fetch(`donnees/${e.f}.json`)).json())[String(num)];
+    if (!p) throw new Error();
+  } catch (e) { $("#zone").innerHTML = `<p class="message">Parcours introuvable. <a href="./">Voir la liste des parcours</a></p>`; return; }
+  document.title = `${p.nom} · survol 3D`;
+  $("#titre").textContent = p.nom;
+  $("#infos").innerHTML = `${nb(p.km)} km · ${nb(p.dplus)} m D+${p.lien_openrunner ? ` · <a href="${esc(p.lien_openrunner)}" target="_blank" rel="noopener">OpenRunner</a>` : ""}`;
+  document.querySelector("header").insertAdjacentHTML("beforeend", `<select id="fond"><option value="satellite">satellite</option><option value="plan">plan</option></select>`);
+  $("#zone").innerHTML = `<div id="carte"><div id="hud"></div></div>
+    <div class="bas"><button id="jouer">▶ Lecture</button>
+      <select id="vit"><option value="0.25">lente</option><option value="0.5" selected>normale</option><option value="1">rapide</option><option value="2">très rapide</option></select>
+      <input type="range" id="pos" min="0" step="0.05" value="0"><svg id="profil"></svg></div>`;
+  const g = p.geom, k0 = g[0][3], kmMax = g.at(-1)[3];
+  $("#pos").min = k0; $("#pos").max = kmMax;
+  const point = km => {
+    km = Math.max(k0, Math.min(kmMax, km));
+    let i = Math.min(g.length - 2, Math.max(0, Math.floor((km - k0) / ((kmMax - k0) / (g.length - 1)))));
+    while (i > 0 && g[i][3] > km) i--;
+    while (i < g.length - 2 && g[i + 1][3] < km) i++;
+    const a = g[i], b = g[i + 1], t = (km - a[3]) / ((b[3] - a[3]) || 1);
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  };
+  const azimut = (a, b) => {
+    const r = Math.PI / 180, y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r),
+      x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r);
+    return (Math.atan2(y, x) / r + 360) % 360;
+  };
+  const style = f => ({ version: 8,
+    sources: { fond: { type: "raster", tileSize: 256, ...FONDS[f] },
+      dem: { type: "raster-dem", encoding: "terrarium", tileSize: 256, maxzoom: 14,
+             tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"], attribution: "Relief : Mapzen / AWS Terrain Tiles" } },
+    layers: [{ id: "fond", type: "raster", source: "fond" }], terrain: { source: "dem", exaggeration: 1.6 } });
+  const ligne = c => ({ type: "Feature", geometry: { type: "LineString", coordinates: c } });
+  let carte, k = k0, cap = null, enCours = false, anim = null, dernier = null;
+  const couches = () => {
+    if (carte.getSource("trace")) return;
+    carte.addSource("trace", { type: "geojson", data: ligne(g.map(x => [x[1], x[0]])) });
+    carte.addLayer({ id: "trace", type: "line", source: "trace", paint: { "line-color": "#b5471b", "line-width": 4, "line-opacity": .85 } });
+    carte.addSource("cotes", { type: "geojson", data: { type: "FeatureCollection", features: p.cotes.map(c =>
+      ligne(g.filter(x => x[3] >= c.km_debut - 1e-6 && x[3] <= c.km_fin + 1e-6).map(x => [x[1], x[0]]))) } });
+    carte.addLayer({ id: "cotes", type: "line", source: "cotes", paint: { "line-color": "#2b5d9b", "line-width": 6 } });
+    carte.addSource("fait", { type: "geojson", data: ligne([[g[0][1], g[0][0]], [g[0][1], g[0][0]]]) });
+    carte.addLayer({ id: "fait", type: "line", source: "fait", paint: { "line-color": "#ffd34d", "line-width": 5 } });
+  };
+  try {
+    carte = new maplibregl.Map({ container: "carte", style: style("satellite"), center: [g[0][1], g[0][0]], zoom: 14, pitch: 62,
+      bearing: azimut(g[0], point(k0 + 0.5)), maxPitch: 80, attributionControl: { compact: true } });
+  } catch (e) { $("#carte").innerHTML = `<p class="message">La carte 3D n'a pas pu s'afficher sur cet appareil.</p>`; return; }
+  carte.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+  const el = document.createElement("div"); el.className = "point";
+  const marqueur = new maplibregl.Marker({ element: el }).setLngLat([g[0][1], g[0][0]]).addTo(carte);
+  carte.on("load", () => { couches(); placer(k, true); });
+  $("#fond").onchange = () => { carte.setStyle(style($("#fond").value)); carte.once("style.load", () => { couches(); placer(k, true); }); };
+  carte.on("dragstart", () => { if (enCours) basculer(); });
+
+  const svg = $("#profil"), W = svg.clientWidth || 700, H = 64;
+  const eMin = Math.min(...g.map(x => x[2])), eMax = Math.max(...g.map(x => x[2]));
+  const X = km => 4 + (W - 8) * (km - k0) / ((kmMax - k0) || 1), Y = v => H - 4 - (H - 12) * (v - eMin) / ((eMax - eMin) || 1);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("height", H);
+  svg.innerHTML = p.cotes.map(c => `<rect x="${X(c.km_debut)}" y="2" width="${Math.max(1, X(c.km_fin) - X(c.km_debut))}" height="${H - 4}" fill="#2b5d9b" opacity=".18"/>`).join("") +
+    `<polyline fill="none" stroke="#b5471b" stroke-width="1.5" points="${g.map(x => `${X(x[3]).toFixed(1)},${Y(x[2]).toFixed(1)}`).join(" ")}"/>
+     <line id="curseur" y1="2" y2="${H - 2}" stroke="#1f2328" stroke-width="1.5"/>`;
+  svg.onclick = e => { const r = svg.getBoundingClientRect(); placer(k0 + (e.clientX - r.left - 4) / (r.width - 8) * (kmMax - k0), true); };
+
+  function placer(km, saut) {
+    k = Math.max(k0, Math.min(kmMax, km));
+    const c = point(k), voulu = azimut(c, point(k + 0.6));
+    if (cap == null || saut) cap = voulu; else { const e = ((voulu - cap + 540) % 360) - 180; cap = (cap + e * 0.06 + 360) % 360; }
+    marqueur.setLngLat([c[1], c[0]]);
+    carte.jumpTo({ center: [c[1], c[0]], bearing: cap, ...(saut ? { pitch: 62, zoom: 14 } : {}) });
+    if (carte.getSource("fait")) carte.getSource("fait").setData(ligne(g.filter(x => x[3] <= k).map(x => [x[1], x[0]]).concat([[c[1], c[0]]])));
+    const av = point(k - 0.2), pente = (c[2] - av[2]) / (Math.min(0.2, k - k0) * 10 || 1);
+    const cote = p.cotes.find(x => k >= x.km_debut && k <= x.km_fin);
+    $("#hud").innerHTML = `<b>${nb(k - k0, 1)} km</b> / ${nb(kmMax - k0, 1)} · ${nb(c[2])} m · pente ${k - k0 > 0.05 ? nb(pente, 1) : "0"} %` +
+      (cote ? `<div class="cote">${esc(cote.nom)} : ${nb(cote.km, 1)} km à ${nb(cote.pente_moy, 1)} % · reste ${nb(cote.km_fin - k, 1)} km</div>` : "");
+    $("#pos").value = k; $("#curseur").setAttribute("x1", X(k)); $("#curseur").setAttribute("x2", X(k));
+  }
+  function pas(t) {
+    if (!enCours) return;
+    if (dernier != null) placer(k + (t - dernier) / 1000 * +$("#vit").value);
+    dernier = t;
+    if (k >= kmMax) { basculer(); return; }
+    anim = requestAnimationFrame(pas);
+  }
+  function basculer() {
+    enCours = !enCours; dernier = null;
+    $("#jouer").textContent = enCours ? "⏸ Pause" : "▶ Lecture";
+    if (enCours) { if (k >= kmMax) placer(k0, true); anim = requestAnimationFrame(pas); } else cancelAnimationFrame(anim);
+  }
+  $("#jouer").onclick = basculer;
+  $("#pos").oninput = e => placer(+e.target.value, true);
+  document.addEventListener("keydown", e => { if (e.key === " " && e.target.tagName !== "INPUT") { e.preventDefault(); basculer(); } });
+}
+
+function demarrer() {
+  if (!num) return liste();
+  if (!window.maplibregl) { $("#zone").innerHTML = `<p class="message">La bibliothèque 3D n'a pas pu être chargée. Vérifiez la connexion internet.</p>`; return; }
+  survol();
+}
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.js" onload="demarrer()" onerror="demarrer()"></script>
+</body>
+</html>
